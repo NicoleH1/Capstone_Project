@@ -1,1 +1,576 @@
+# Import Packages
+import pandas as pd
+import numpy as np
+import os
+import xlsxwriter
+import folium
+from folium.plugins import MarkerCluster
+import json
+from geopy.geocoders import Nominatim
+import geojson
+import requests
+import webbrowser
+import geojson
+
+print('Libraries imported.')
+
+# Set run view preference and set working directory
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+wd = os.getcwd()
+
+# Field to input the location city
+city = 'Rotterdam'
+
+# PART A - PREPARE THE DATASET FOR [CITY]
+
+# 1. Load, clean and merge Location Datasets
+# Create 1 dataset with all PostalCodes and corresponding (1) Municipalities, (2) Neighbourhoods and (3) Area's
+
+# Define Script Parameters (File Names)
+postalcode_data_path = r"/Input/pc6hnr20190801_gwb.csv"
+municipality_data_path = r"//Input//gem2019.csv"
+neighbourhood_data_path = r"//input//buurt2019.csv"
+area_data_path = r"//Input//wijk2019.csv"
+
+# Load datasets
+# a. PostalCodes
+df_PC = pd.read_csv(wd + postalcode_data_path, delimiter=';')
+# b. Municipality
+df_MUN = pd.read_csv(wd + municipality_data_path, delimiter=';')
+# c. Neighbourhood
+df_NEIGH = pd.read_csv(wd + neighbourhood_data_path, delimiter=';')
+# d. Area
+df_AREA = pd.read_csv(wd + area_data_path, delimiter=';')
+
+# Clean and format datasets
+# a. Postal Codes
+df_PC = df_PC.rename(columns={"PC6": "PostalCode6", "Huisnummer": "HouseNumber", "Buurt2019": "Neighbourhood_code",
+                              "Wijk2019": "Area_code", "Gemeente2019": "Municipality_code"})
+df_PC.drop(['HouseNumber'], axis=1, inplace=True)
+df_PC.drop_duplicates(keep='first', inplace=True)
+df_PC = df_PC.reset_index(drop=True)
+print('\n')
+print("Formatted PostalCode dataframe:")
+print(df_PC.head())
+
+# b. Municipality
+df_MUN = df_MUN.rename(columns={"Gemcode2019": "Municipality_code", "Gemeentenaam2019": "Municipality"})
+print('\n')
+print("Formatted Municipality dataframe:")
+print(df_MUN.head())
+
+# c. Neighbourhood
+df_NEIGH = df_NEIGH.rename(columns={"Buurtcode_2019": "Neighbourhood_code", "Buurtnaam_2019": "Neighbourhood"})
+print('\n')
+print("Formatted Neighbourhood dataframe:")
+print(df_NEIGH.head())
+
+# d. Area
+df_AREA = df_AREA.rename(columns={"Wijkcode2019": "Area_code", "Wijknaam_2019K_NAAM": "Area"})
+print("\n")
+print("Formatted Area dataframe:")
+print(df_AREA.head())
+
+# Merge all datasets to one
+df_all = df_PC.merge(df_MUN, how='inner', on='Municipality_code')
+df_all1 = df_all.merge(df_NEIGH, how='inner', on='Neighbourhood_code')
+df_PC6 = df_all1.merge(df_AREA, how='inner', on='Area_code')
+print("\n")
+print("PostalCode 6 figure dataset:")
+print(df_PC6.head())
+
+# Create dataset based on 4 figure PostalCode
+df_PC4 = df_PC6
+df_PC4['PostalCode4'] = df_PC4['PostalCode6'].str[:4]
+df_PC4.drop(['PostalCode6'], axis=1, inplace=True)
+df_PC4.drop_duplicates(keep='first', inplace=True)
+df_PC4 = df_PC4.reset_index(drop=True)
+df_PC4['PostalCode4'] = df_PC4['PostalCode4'].astype(float)
+
+print("\n")
+print("Formatted PostalCode 4 figure dataset:")
+print(df_PC4.head(5))
+
+
+# Create and write dataset based on 4 figure PostalCode for [city]
+df_PCCITY = df_PC4.loc[df_PC4.Municipality == city]
+writer = pd.ExcelWriter(wd + "\Output\postalcodecity.xlsx", engine='xlsxwriter')
+df_PCCITY.to_excel(writer, sheet_name=city)
+writer.save()
+
+
+
+# 2. Load and clean Demograpics and Characteristics Datasets
+# Define Script Parameters (File Names)
+demographics_data_path = r"/Input/2014_PC6_demografie_en_wonen.csv"
+characteristics_data_path = r"/Input/161010-Kenmerken-postcode-mw.csv"
+
+# Load datasets
+# a. Demographics
+wd = os.getcwd()
+df_DEMO = pd.read_csv(wd + demographics_data_path, delimiter=',')
+# print(df_DEMO.head())
+
+# b. Characteristics
+df_CHAR = pd.read_csv(wd + characteristics_data_path, delimiter=';')
+# print(df_CHAR.head())
+
+# Clean and format datasets
+# a. Demographics
+# Rename columns
+df_DEMO['PostalCode4'] = df_DEMO['pc6'].str[:4]
+df_DEMO.drop(['pc6', 'gemeentecode', 'particulier_hh', 'eenpers_hh', 'meerpers_hh', 'eenoud_hh', 'tweeoud_hh', 'mannen',
+              'vrouwen', 'gem_WOZwaarde_klas'], axis=1, inplace=True)
+df_DEMO = df_DEMO.rename(columns={"inwoners": "Citizens", "lft_0_14": "Age 0-14",
+                                  "lft_15_24": "Age 15-24", "lft_25_44": "Age 25-44", "lft_45_64": "Age 45-64",
+                                  "lft_65_74": "Age 65-74", "lft_75plus": "Age 75+",
+                                  "nwallochtonen_klas": "Cultural_diversity",
+                                  "huishoudgrootte": "Household_size"})
+
+# Create PostalCode 4 - Demographics dataframe
+
+df_DEMOPC4 = df_DEMO.groupby('PostalCode4', as_index=False, group_keys=False).agg(
+    {"Citizens": "sum", 'Age 0-14': ['sum'],
+     'Age 15-24': ['sum'], 'Age 25-44': ['sum'], 'Age 45-64': ['sum'],
+     'Age 65-74': ['sum'], 'Age 75+': ['sum'], 'Cultural_diversity': ['mean'], 'Household_size': ['mean']}, skipna=True,
+    as_index=False)
+
+df_DEMOPC4.columns = ['PostalCode4', 'Population_size', 'Age_0-14_num', 'Age_15-24_num', 'Age_25-44_num',
+                      'Age_45-64_num', 'Age_65-74_num',
+                      'Age_75+_num', 'Cultural_diversity', 'Household_size']
+
+# Create % values - % of total age category of total citicens
+df_DEMOPC4['Age_0-14'] = df_DEMOPC4['Age_0-14_num'] / df_DEMOPC4['Population_size']
+df_DEMOPC4['Age_15-24'] = df_DEMOPC4['Age_15-24_num'] / df_DEMOPC4['Population_size']
+df_DEMOPC4['Age_25-44'] = df_DEMOPC4['Age_25-44_num'] / df_DEMOPC4['Population_size']
+df_DEMOPC4['Age_45-64'] = df_DEMOPC4['Age_45-64_num'] / df_DEMOPC4['Population_size']
+df_DEMOPC4['Age_65-74'] = df_DEMOPC4['Age_65-74_num'] / df_DEMOPC4['Population_size']
+df_DEMOPC4['Age_75+'] = df_DEMOPC4['Age_75+_num'] / df_DEMOPC4['Population_size']
+
+df_DEMOPC4.drop(
+    [('Age_0-14_num'), ('Age_15-24_num'), ('Age_25-44_num'), ('Age_45-64_num'), ('Age_65-74_num'),
+     ('Age_75+_num')], axis=1, inplace=True)
+
+df_DEMOPC4 = df_DEMOPC4.replace(r'^\s*$', np.nan, regex=True)
+
+print("\n")
+print("Formatted Demographics dataset:")
+print(df_DEMOPC4.head(50))
+print(df_DEMOPC4.columns)
+
+# b. Characteristics
+# Rename columns
+df_CHAR = df_CHAR.rename(
+    columns={"Postcode (4-cijferig)": "PostalCode4", "Gemiddeld aantal adressen": "Population_density",
+             "Stedelijkheid": "Urban", "WOZ-waarde": "WOZ_value", "Uitkering": "Financial_aid_num", })
+
+df_CHAR = df_CHAR.replace(r'^\s*$', np.nan, regex=True)
+
+print("\n")
+print("Formatted Characteristics dataset:")
+print(df_CHAR.head())
+print(df_CHAR.columns)
+
+# 3. Combine all relevant columns from databases on Postalcode 4
+# Merge Characteristics and Demographics
+
+df_DEMOPC4 = df_DEMOPC4.astype(float)
+df_CHAR = df_CHAR.astype(float)
+df_DEMOCHARPC4 = df_DEMOPC4.merge(df_CHAR, how='right', on='PostalCode4')
+df_DEMOCHARPC4['Financial_aid'] = df_DEMOCHARPC4['Financial_aid_num'] / df_DEMOCHARPC4['Population_size']
+df_DEMOCHARPC4.drop([('Financial_aid_num')], axis=1, inplace=True)
+
+print("\n")
+print("Formatted all Demographics and Characteristics dataset:")
+print(df_DEMOCHARPC4.head())
+
+df_NL = df_DEMOCHARPC4.merge(df_PC4, how='right', on='PostalCode4')
+df_NL.drop([('Neighbourhood_code'), ('Area_code'), ('Municipality_code'), ('Neighbourhood'), ('Area')], axis=1,
+           inplace=True)
+df_NL.drop_duplicates(keep='first', inplace=True)
+print("\n")
+print("PostalCode 4 figure dataset:")
+print(df_NL.head())
+
+# 4. Create dataset for [city] with all Characteristics and Demographics
+df_city = df_NL.loc[df_NL.Municipality == city]
+df_city.sort_values(by=['PostalCode4'], inplace=True)
+print("\n")
+print("Final prepared dataset for " + city + " :")
+print(df_city.head(50))
+
+# 5. Write output to Excel
+# Create a Pandas Excel writer using XlsxWriter as the engine.
+writer = pd.ExcelWriter(wd + "\Output\OutputNL.xlsx", engine='xlsxwriter')
+
+# Convert the dataframe to an XlsxWriter Excel object.
+df_NL.to_excel(writer, sheet_name=city)
+
+# Close the Pandas Excel writer and output the Excel file.
+writer.save()
+
+# PART B - CREATE CHOROPLETH MAP TO VISUALISE THE DATASET FOR [CITY]
+
+# 1. Prepare datasets
+# Prepare csv and json file
+df_city = df_city.rename(columns={"PostalCode4": "PC4"})
+NLPC4_json = 'https://raw.githubusercontent.com/openstate/hackdetoekomst/master/datablog/nlmaps-stages/cbs_pc4_2017.geo.json'
+
+# 2. Create Basis Map
+# Get coordinates and map of the [city]
+geolocator = Nominatim(user_agent="nl_explorer")
+location = geolocator.geocode(city)
+latitude = location.latitude
+longitude = location.longitude
+print("\n")
+print('The geographical coordinates of ' + city + ' are {}, {}.'.format(latitude, longitude))
+
+# Create map_city
+map_city = folium.Map(location=[latitude, longitude], zoom_start=11, tiles=None)
+folium.TileLayer('cartodbpositron').add_to(map_city)
+
+# Add PostalCode labels to map
+style_function = lambda x: {'fillColor': '#ffffff',
+                            'color': '#000000',
+                            'fillOpacity': 0.1,
+                            'weight': 0.1}
+highlight_function = lambda x: {'fillColor': '#000000',
+                                'color': '#000000',
+                                'fillOpacity': 0.50,
+                                'weight': 0.1}
+
+map_city_layer = folium.GeoJson(data=NLPC4_json,
+                                name='Hover-over',
+                                control=False,
+                                style_function=style_function,
+                                tooltip=folium.GeoJsonTooltip(fields=['PC4'],
+                                                              aliases=['Postalcode: '],
+                                                              labels=True,
+                                                              style=(
+                                                                  "background-color: white; color: #333333; font-family: arial; font-size: 12px; padding: 10px;"),
+                                                              sticky=True),
+                                highlight_function=highlight_function,
+                                ).add_to(map_city)
+
+# 3. Create Choropleths
+
+# Create percentile bins for proportional visualisation
+bin_popdens = list(df_city['Population_density'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+bin_housesize = list(df_city['Household_size'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+bin_age2544 = list(df_city['Age_25-44'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+bin_woz = list(df_city['WOZ_value'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+bin_finaid = list(df_city['Financial_aid'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+bin_culdiv = list(df_city['Cultural_diversity'].quantile([0, 0.2, 0.4, 0.6, 0.8, 1]))
+
+# 1. Population Density
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='Population Density',
+    data=df_city,
+    columns=['PC4', 'Population_density'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='Population Density - # addresses in PostalCode',
+    show=False,
+    bins=bin_popdens,
+).add_to(map_city)
+
+# 2. Household Size
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='Household Size',
+    data=df_city,
+    columns=['PC4', 'Household_size'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='Household Size - Average household size in Postalcode',
+    show=False,
+    bins=bin_housesize,
+).add_to(map_city)
+
+# 3. Age 25-44
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='Age 25-44',
+    data=df_city,
+    columns=['PC4', 'Age_25-44'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='Age 25-44 - % of the Postalcode population aged 25-44',
+    show=False,
+    bins=bin_age2544,
+).add_to(map_city)
+
+# 4. WOZ Value
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='WOZ Value',
+    data=df_city,
+    columns=['PC4', 'WOZ_value'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='WOZ-Value * 1000 - Average WOZ value in Postalcode',
+    show=False,
+    bins=bin_woz,
+).add_to(map_city)
+
+# 5. Financial aid
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='Financial aid',
+    data=df_city,
+    columns=['PC4', 'Financial_aid'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='Financial aid - % of Postalcode pop. receiving governmental financial support',
+    reset=True,
+    highlight=True,
+    nan_fill_color='#646464',
+    show=False,
+    bins=bin_finaid,
+).add_to(map_city)
+
+# 6. Cultural Diversity
+folium.Choropleth(
+    geo_data=NLPC4_json,
+    name='Cultural diversity',
+    data=df_city,
+    columns=['PC4', 'Cultural_diversity'],
+    key_on='feature.properties.PC4',
+    fill_color='YlGnBu',
+    fill_opacity=0.7,
+    line_opacity=0.3,
+    nan_fill='#646464',
+    nan_fill_opacity=0.3,
+    legend_name='Cultural diversity - Governmental set cultural diversity score',
+    show=False,
+    bins=bin_culdiv,
+).add_to(map_city)
+
+# PART C - ADD MARKERS TO [CITY] MAP
+
+# 1. Area Markers
+
+# Read and clean Netherlands Postalcode Coordinates CSV
+coordinates_data_path_csv = r"//Input//Postcode_Coordinates.csv"
+df_Coord = pd.read_csv(wd + coordinates_data_path_csv, delimiter=',', engine='python')
+df_Coord = df_Coord[df_Coord.soort != 'Postbus']
+df_Coord.drop(['id', 'alternatieve_schrijfwijzen', 'netnummer', 'soort'], axis=1, inplace=True)
+df_Coord = df_Coord.rename(columns={"postcode": "PC4", "woonplaats": "Town", "gemeente": "Municipality",
+                                    "provincie": "Province", "latitude": "Latitude", "longitude": "Longitude"})
+
+# Create database for [city]
+df_Coord_City = df_Coord.loc[df_Coord.Municipality == city]
+print(df_Coord_City.head())
+
+# Create Marker for Town Names
+marker_town = folium.FeatureGroup(name='Town Names', show=False)
+map_city.add_child(marker_town)
+marker_cluster = MarkerCluster().add_to(marker_town)
+
+for lat, lng, borough, neighborhood in zip(df_Coord_City['Latitude'], df_Coord_City['Longitude'],
+                                           df_Coord_City['Town'], df_Coord_City['Municipality']):
+    label = '{}'.format(borough)
+    label = folium.Popup(label, parse_html=True)
+    folium.CircleMarker(
+        [lat, lng],
+        name="gemeente",
+        radius=3,
+        popup=label,
+        # tooltip=label,
+        color='blue',
+        fill=True,
+        fill_color='#3186cc',
+        fill_opacity=0.7,
+        parse_html=False).add_to(marker_town)
+
+# 2. Venue Markers
+
+# Retrieve ForeSquare Data
+
+
+# FOURSQUARE DO NOT USE OFTEN
+
+CLIENT_ID = 'ECGHJ5P42200BV0WAAEEMFEEUPQ4GKFBRS2RQ25FVBFE3TWM'
+CLIENT_SECRET = 'GHDTNZE3RCVA135ZR5QPAHGB5341WHOWDGXNN5OHFZ5UYELY'
+VERSION = '20180605'
+   
+print('Your credentails:')
+print('CLIENT_ID: ' + CLIENT_ID)
+print('CLIENT_SECRET:' + CLIENT_SECRET)
+
+def getNearbyVenues(names, latitudes, longitudes, radius=1000):
+       venues_list=[]
+       for name, lat, lng in zip(names, latitudes, longitudes):
+           # create the API request URL
+           url = 'https://api.foursquare.com/v2/venues/explore?&client_id={}&client_secret={}&v={}&ll={},{}&radius={}&limit={}'.format(
+               CLIENT_ID,
+               CLIENT_SECRET,
+               VERSION,
+               lat,
+               lng,
+               radius,
+               LIMIT)
+           # make the GET request
+           results = requests.get(url).json()["response"]['groups'][0]['items']
+           # return only relevant information for each nearby venue
+           venues_list.append([(
+               name,
+               lat,
+               lng,
+               v['venue']['name'],
+               v['venue']['location']['lat'],
+               v['venue']['location']['lng'],
+               v['venue']['categories'][0]['name']) for v in results])
+       nearby_venues = pd.DataFrame([item for venue_list in venues_list for item in venue_list])
+       nearby_venues.columns = ['PostalCode4',
+                     'PostalCode4 Latitude',
+                     'PostalCode4 Longitude',
+                     'Venue',
+                     'Venue Latitude',
+                     'Venue Longitude',
+                     'Venue Category']
+       return(nearby_venues)
+
+LIMIT = 1000
+radius = 1000
+City_venues = getNearbyVenues(names=df_Coord_City['PC4'],
+                                      latitudes=df_Coord_City['Latitude'],
+                                      longitudes=df_Coord_City['Longitude'])
+
+# Create a Pandas Excel writer using XlsxWriter as the engine.
+writer = pd.ExcelWriter(wd + "\Output\Venue.xlsx", engine='xlsxwriter')
+
+# Convert the dataframe to an XlsxWriter Excel object.
+City_venues.to_excel(writer, sheet_name=city)
+
+# Close the Pandas Excel writer and output the Excel file.
+writer.save()
+
+
+
+# Read saved Foursquare xlsx as CSV
+read_file = pd.read_excel(wd + "\Output\Venue.xlsx")
+read_file.to_csv(wd + '\Output\Venue.csv', index=None, header=True)
+City_venues = pd.read_csv(wd + "\Output\Venue.csv", delimiter=',', engine='python')
+City_venues = City_venues.rename(
+    columns={"Neighborhood": "PostalCode4", "Neighborhood Latitude": "PostalCode4 Latitude",
+             "Neighborhood Longitude": "PostalCode4 Longitude"})
+print(City_venues.head())
+
+# Load CSV to further define Category
+venuecat_data_path = "/Input/venuecat.csv"
+df_venuecat = pd.read_csv(wd + venuecat_data_path, delimiter=';', engine='python')
+df_venuecat = df_venuecat.rename(columns={"venue": "Venue Category", "venue_category": "Category"})
+df_venuecat = df_venuecat[(df_venuecat['level'] == 1)]
+print('\n')
+print('Venue and Venue Categories')
+print(df_venuecat.head())
+City_venues = City_venues.merge(df_venuecat, how='inner', on='Venue Category')
+print('\n')
+print('Dataframe Adresses per Postalcode')
+print(City_venues.head())
+
+# Create dataframes and Markers for the different categories
+MAX_RECORDS = 1000
+
+# 1. Athletics & Sports
+df_AthleticsSports = City_venues[(City_venues['Category'] == 'Athletics & Sports')]
+marker_AthleticsSports = folium.FeatureGroup(name='Athletics & Sports', show=False)
+map_city.add_child(marker_AthleticsSports)
+marker_cluster = MarkerCluster().add_to(marker_AthleticsSports)
+
+for each in df_AthleticsSports[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_AthleticsSports)
+
+# 2. Bar
+df_Bar = City_venues[(City_venues['Category'] == 'Bar')]
+marker_Bar = folium.FeatureGroup(name='Bar', show=False)
+map_city.add_child(marker_Bar)
+marker_cluster = MarkerCluster().add_to(marker_Bar)
+
+for each in df_Bar[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_Bar)
+
+# 3. Clothing Store
+df_Clothes = City_venues[(City_venues['Category'] == 'Clothing Store')]
+marker_Clothes = folium.FeatureGroup(name='Clothing Store', show=False)
+map_city.add_child(marker_Clothes)
+marker_cluster = MarkerCluster().add_to(marker_Clothes)
+
+for each in df_Clothes[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_Clothes)
+
+# 4. Food & Drink Shop
+df_FoodDrink = City_venues[(City_venues['Category'] == 'Food & Drink Shop')]
+marker_FoodDrink = folium.FeatureGroup(name='Food & Drink Shop', show=False)
+map_city.add_child(marker_FoodDrink)
+marker_cluster = MarkerCluster().add_to(marker_FoodDrink)
+
+for each in df_FoodDrink[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_FoodDrink)
+
+# 5. Restaurant
+df_Restaurant = City_venues[(City_venues['Category'] == 'Restaurant')]
+marker_Restaurant = folium.FeatureGroup(name='Restaurant', show=False)
+map_city.add_child(marker_Restaurant)
+marker_cluster = MarkerCluster().add_to(marker_Restaurant)
+
+for each in df_Restaurant[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_Restaurant)
+
+# 6. Train Stations
+df_Train = City_venues[(City_venues['Category'] == 'Train Stations')]
+marker_Train = folium.FeatureGroup(name='Train Stations', show=False)
+map_city.add_child(marker_Train)
+marker_cluster = MarkerCluster().add_to(marker_Train)
+
+for each in df_Train[0:MAX_RECORDS].iterrows():
+    folium.Marker(
+        location=[each[1]['Venue Latitude'], each[1]['Venue Longitude']],
+        popup=[each[1]['Venue'], each[1]['Venue Category']],
+        clustered_marker=True).add_to(marker_Train)
+
+# PART D - SHOW RESULTS
+map_city.keep_in_front(map_city_layer)
+folium.LayerControl().add_to(map_city)
+filepath = 'CityMap.html'
+map_city.save(filepath)
+webbrowser.open('file://' + wd + '/' + filepath)
 
